@@ -25,10 +25,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-eval = ["mt-metrics-eval"]
+eval = ["mt-metrics-eval @ git+https://github.com/google-research/mt-metrics-eval.git"]
 
 [project.scripts]
 gemba = "gemba.cli:run"
+
+[tool.uv]
+# Restrict resolution to Linux to avoid failures from mt-metrics-eval
+# (not on PyPI) when resolving for Windows/macOS
+environments = ["sys_platform == 'linux'"]
 
 [tool.setuptools.packages.find]
 include = ["gemba"]
