@@ -1,17 +1,18 @@
+import logging
 import os
 import sys
 import time
-import ipdb
-import logging
-from termcolor import colored
-from datetime import datetime
+
 import openai
 import tqdm
+from openai import BadRequestError, NotFoundError, PermissionDeniedError
+
+logger = logging.getLogger(__name__)
 
 
 # class for calling OpenAI API and handling cache
 class GptApi:
-    def __init__(self, verbose=False):
+    def __init__(self, verbose=False, api_version=None):
         self.verbose = verbose
 
         if "OPENAI_AZURE_ENDPOINT" in os.environ:
@@ -21,7 +22,7 @@ class GptApi:
             self.client = openai.AzureOpenAI(
                 api_key=os.environ["OPENAI_AZURE_KEY"],
                 azure_endpoint=os.environ["OPENAI_AZURE_ENDPOINT"],
-                api_version="2023-07-01-preview"
+                api_version=api_version or "2023-07-01-preview",
             )
         elif "OPENAI_API_KEY" in os.environ:
             # OpenAI API access
@@ -31,16 +32,18 @@ class GptApi:
         else:
             raise Exception("OPENAI_API_KEY or OPENAI_AZURE_KEY not found in environment")
 
-        logging.getLogger().setLevel(logging.CRITICAL)  # in order to suppress all these HTTP INFO log messages
+        # Suppress noisy HTTP loggers (don't touch the root logger)
+        for _name in ("httpx", "openai", "urllib3"):
+            logging.getLogger(_name).setLevel(logging.WARNING)
 
     # answer_id is used for determining if it was the top answer or how deep in the list it was
-    def request(self, prompt, model, parse_response, temperature=0, answer_id=-1, cache=None, max_tokens=None):
+    def request(self, prompt, model, parse_response, temperature=0, answer_id=-1, cache=None, max_tokens=None, response_format=None):
         request = {"model": model, "temperature": temperature, "prompt": prompt}
 
         if request in cache and cache[request] is not None and len(cache[request]) > 0:
             answers = cache[request]
         else:
-            answers = self.request_api(prompt, model, temperature, max_tokens)
+            answers = self.request_api(prompt, model, temperature, max_tokens, response_format=response_format)
             cache[request] = answers
 
         # there is no valid answer
@@ -60,8 +63,8 @@ class GptApi:
             full_answer = full_answer["answer"]
             answer_id += 1
             answer = parse_response(full_answer)
-            if self.verbose or temperature > 0:
-                print(f"Answer (t={temperature}): " + colored(answer, "yellow") + " (" + colored(full_answer, "blue") + ")", file=sys.stderr)
+            if self.verbose:
+                logger.debug("Answer (t=%d): %s (%s)", temperature, answer, full_answer)
             if answer is None:
                 continue
             parsed_answers.append(
@@ -77,30 +80,27 @@ class GptApi:
 
         # there was no valid answer, increase temperature and try again
         if len(parsed_answers) == 0:
-            return self.request(prompt, model, parse_response, temperature=temperature + 1, answer_id=answer_id, cache=cache)
+            return self.request(prompt, model, parse_response, temperature=temperature + 1, answer_id=answer_id, cache=cache, response_format=response_format)
 
         return parsed_answers
 
-    def request_api(self, prompt, model, temperature=0, max_tokens=None):
+    def request_api(self, prompt, model, temperature=0, max_tokens=None, response_format=None):
         if temperature > 10:
             return []
 
         while True:
             try:
-                response = self.call_api(prompt, model, temperature, max_tokens)
+                response = self.call_api(prompt, model, temperature, max_tokens, response_format=response_format)
                 break
-            except Exception as e:
-                # response was filtered
-                if hasattr(e, 'code'):
-                    if e.code == 'content_filter':
-                        return []
-                    print(e.code, file=sys.stderr)
-                if hasattr(e, 'error') and e.error['code'] == 'invalid_model_output':
+            except (BadRequestError, NotFoundError, PermissionDeniedError) as e:
+                if getattr(e, "code", None) == "content_filter":
                     return []
-
-                # frequent error is reaching the API limit
-                print(colored("Error, retrying...", "red"), file=sys.stderr)
-                print(e, file=sys.stderr)
+                raise
+            except Exception as e:
+                error_body = getattr(e, "error", None)
+                if isinstance(error_body, dict) and error_body.get("code") == "invalid_model_output":
+                    return []
+                logger.warning("API error, retrying: %s", e)
                 time.sleep(1)
 
         answers = []
@@ -111,15 +111,13 @@ class GptApi:
                 answer = choice.message.content.strip()
             else:
                 answer = choice.text.strip()
-                
+
             # one of the responses didn't finish, we need to request more tokens
             if choice.finish_reason != "stop":
-                if self.verbose:
-                    print(colored(f"Increasing max tokens to fit answers.", "red") + colored(answer, "blue"), file=sys.stderr)
-                print(f"Finish reason: {choice.finish_reason}", file=sys.stderr)
+                logger.warning("Finish reason: %s", choice.finish_reason)
                 if max_tokens is None:
                     return []
-                return self.request_api(prompt, model, temperature=temperature, max_tokens=max_tokens + 200)
+                return self.request_api(prompt, model, temperature=temperature, max_tokens=max_tokens + 200, response_format=response_format)
 
             answers.append({
                 "answer": answer,
@@ -132,19 +130,24 @@ class GptApi:
 
         return answers
 
-    def call_api(self, prompt, model, temperature, max_tokens):
+    def call_api(self, prompt, model, temperature, max_tokens, response_format=None):
         parameters = {
             "temperature": temperature/10,
             "top_p": 1,
             "n": 1,
             "frequency_penalty": 0,
             "presence_penalty": 0,
-            "stop": None,
             "model": model
         }
 
+        if response_format is not None:
+            parameters["response_format"] = response_format
+
         if max_tokens is not None:
-            parameters["max_tokens"] = max_tokens
+            if any(model.startswith(p) for p in ("gpt-4.1", "gpt-4o", "gpt-5")):
+                parameters["max_completion_tokens"] = max_tokens
+            else:
+                parameters["max_tokens"] = max_tokens
 
         if isinstance(prompt, list):
             # check that prompt contain list of dictionaries with role and content
@@ -159,11 +162,11 @@ class GptApi:
             }]
 
         return self.client.chat.completions.create(**parameters)
-    
-    def bulk_request(self, df, model, parse_mqm_answer, cache, max_tokens=None):
+
+    def bulk_request(self, df, model, parse_mqm_answer, cache, max_tokens=None, response_format=None):
         answers = []
         for i, row in tqdm.tqdm(df.iterrows(), total=len(df), file=sys.stderr):
             prompt = row["prompt"]
-            parsed_answers = self.request(prompt, model, parse_mqm_answer, cache=cache, max_tokens=max_tokens)
+            parsed_answers = self.request(prompt, model, parse_mqm_answer, cache=cache, max_tokens=max_tokens, response_format=response_format)
             answers += parsed_answers
         return answers

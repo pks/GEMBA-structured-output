@@ -1,7 +1,10 @@
-import ipdb
 import json
+import logging
 import re
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
+
 
 def apply_template(template, data):
     if isinstance(template, str):
@@ -84,6 +87,29 @@ def parse_mqm_answer(x, list_mqm_errors=False, full_desc=True):
         return None
 
     x = str(x)
+
+    # Handle structured JSON output from response_format
+    try:
+        parsed = json.loads(x)
+        if isinstance(parsed, dict) and "errors" in parsed:
+            # Convert structured errors to text format for the existing parser below
+            lines = []
+            for level in ("critical", "major", "minor"):
+                items = parsed["errors"].get(level, [])
+                lines.append(f"{level}:")
+                if not items:
+                    lines.append("no-error")
+                else:
+                    for item in items:
+                        if isinstance(item, dict):
+                            lines.append(f"{item.get('category', 'other')} - {item.get('description', '')}")
+                        else:
+                            lines.append(str(item))
+            x = "\n".join(lines)
+            # Fall through to text parser below
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
     if x.startswith('{"improved translation"'):
         try:
             x = json.loads(x)
@@ -112,10 +138,10 @@ def parse_mqm_answer(x, list_mqm_errors=False, full_desc=True):
 
             if "critical" in line or "major" in line or "minor" in line:
                 if not any([line.startswith(x) for x in ['accuracy', 'fluency', 'locale convention', 'style', 'terminology', 'non-translation', 'other']]):
-                    print(line)
+                    logger.debug("Unexpected error level reference in line: %s", line)
 
             if error_level is None:
-                print(f"No error level for {line}")
+                logger.warning("No error level for: %s", line)
                 continue
 
             if "non-translation" in line:
@@ -163,7 +189,7 @@ def mqm_fewshot(few_shots):
 ```{target_seg}```
 
 Based on the source segment and machine translation surrounded with triple backticks, identify error types in the translation and classify them. The categories of errors are: accuracy (addition, mistranslation, omission, untranslated text), fluency (character encoding, grammar, inconsistency, punctuation, register, spelling), style (awkward), terminology (inappropriate for context, inconsistent use), non-translation, other, or no-error.\nEach error is classified as one of three categories: critical, major, and minor. Critical errors inhibit comprehension of the text. Major errors disrupt the flow, but what the text is trying to say is still understandable. Minor errors are technically errors, but do not disrupt the flow or hinder comprehension."""
-   
+
     for shot in few_shots:
         prompts.append({
             "role": "user",
@@ -230,4 +256,3 @@ style/awkward - "etc.,"
 }
 
 TEMPLATE_GEMBA_MQM = mqm_fewshot([few_shots['ende'], few_shots['encs'], few_shots['zhen']])
-

@@ -1,5 +1,8 @@
+import json
+import logging
 import re
-from termcolor import colored
+
+logger = logging.getLogger(__name__)
 
 
 def parse_and_check_numerical_answer(answer, min=None, max=None):
@@ -13,6 +16,15 @@ def parse_and_check_numerical_answer(answer, min=None, max=None):
 
 
 def parse_numerical_answer(answer, min=None, max=None):
+    # Try structured JSON output first (from response_format)
+    try:
+        parsed = json.loads(answer)
+        if isinstance(parsed, dict) and "score" in parsed:
+            return int(parsed["score"])
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # --- Original parsing logic ---
     # get all numbers in a string
     numbers = re.findall(r'\d+', answer)
     if len(numbers) == 1:
@@ -28,6 +40,32 @@ def parse_numerical_answer(answer, min=None, max=None):
         r2 = re.match(rf"^[0-9]*/{max}$", answer)
         if r2 is not None:
             return int(answer.split("/")[0])
+
+    # --- Extended fallbacks for newer models that return verbose responses ---
+
+    # Strip markdown bold formatting and retry
+    cleaned = re.sub(r"\*+", "", answer).strip()
+    if cleaned != answer:
+        numbers = re.findall(r'\d+', cleaned)
+        if len(numbers) == 1:
+            return int(numbers[0])
+        if max is not None:
+            r2 = re.match(rf"^[0-9]*/{max}$", cleaned)
+            if r2 is not None:
+                return int(cleaned.split("/")[0])
+
+    # Look for N/MAX pattern anywhere in the string (original only matches ^N/MAX$)
+    if max is not None:
+        fraction_match = re.search(rf"(\d+)/{max}(?:\D|$)", cleaned)
+        if fraction_match is not None:
+            return int(fraction_match.group(1))
+
+    # If exactly 2 numbers and the second equals max, take the first as the score
+    numbers = re.findall(r"\d+", cleaned)
+    if len(numbers) == 2 and max is not None:
+        vals = [int(n) for n in numbers]
+        if vals[1] == max:
+            return vals[0]
 
     return None
 
@@ -46,13 +84,15 @@ def parse_classes(answer, classes):
             if final_class is None:
                 final_class = i
             else:
-                print(colored(f"Two classes found in answer {answer}", "red"))
+                logger.warning("Two classes found in answer: %s", answer)
                 return None
 
     return final_class
 
 
 def validate_stars(x):
+    # Strip markdown bold formatting before processing (newer models wrap in **)
+    x = re.sub(r"\*\*(.+?)\*\*", r"\1", x)
     x = x.lower()
     # try to find all possible answers as sometimes it seems to be explaining itself
     possible_answers = set()

@@ -13,6 +13,8 @@ flags.DEFINE_string('hypothesis', None, 'Filepath to the translation file.')
 flags.DEFINE_string('source_lang', None, 'Source language name.')
 flags.DEFINE_string('target_lang', None, 'Target language name.')
 flags.DEFINE_boolean('list_mqm_errors', False, 'List MQM errors.')
+flags.DEFINE_string('api_version', None, 'API version for Azure OpenAI (overrides default).')
+flags.DEFINE_boolean('no_structured_output', False, 'Disable structured output (JSON schema response_format).')
 
 def main(argv):
     assert FLAGS.source is not None, "Source file must be provided."
@@ -37,7 +39,12 @@ def main(argv):
 
     assert len(source) == len(hypothesis), "Source and hypothesis files must have the same number of lines."
 
-    answers = get_gemba_scores(source, hypothesis, FLAGS.source_lang, FLAGS.target_lang, FLAGS.method, FLAGS.model, FLAGS.list_mqm_errors)
+    answers = get_gemba_scores(
+        source, hypothesis, FLAGS.source_lang, FLAGS.target_lang,
+        FLAGS.method, FLAGS.model, FLAGS.list_mqm_errors,
+        api_version=FLAGS.api_version,
+        use_structured_output=not FLAGS.no_structured_output,
+    )
 
     for answer in answers:
         print(answer)
@@ -50,4 +57,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
