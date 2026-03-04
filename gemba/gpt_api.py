@@ -12,10 +12,18 @@ logger = logging.getLogger(__name__)
 
 # class for calling OpenAI API and handling cache
 class GptApi:
-    def __init__(self, verbose=False, api_version=None):
+    def __init__(self, verbose=False, api_version=None, base_url=None):
         self.verbose = verbose
+        self.is_openai = False
 
-        if "OPENAI_AZURE_ENDPOINT" in os.environ:
+        if base_url is not None:
+            # Custom endpoint (e.g. Ollama, vLLM, etc.)
+            self.client = openai.OpenAI(base_url=base_url.rstrip("/") + "/v1", api_key="none")
+        elif "OLLAMA_HOST" in os.environ:
+            # Ollama API access
+            ollama_host = os.environ["OLLAMA_HOST"].rstrip("/")
+            self.client = openai.OpenAI(base_url=ollama_host + "/v1", api_key="ollama")
+        elif "OPENAI_AZURE_ENDPOINT" in os.environ:
             assert "OPENAI_AZURE_KEY" in os.environ, "OPENAI_AZURE_KEY not found in environment"
 
             # Azure API access
@@ -29,8 +37,9 @@ class GptApi:
             self.client = openai.OpenAI(
                 api_key=os.environ["OPENAI_API_KEY"]
             )
+            self.is_openai = True
         else:
-            raise Exception("OPENAI_API_KEY or OPENAI_AZURE_KEY not found in environment")
+            raise Exception("Set OPENAI_API_KEY, OPENAI_AZURE_KEY, or OLLAMA_HOST")
 
         # Suppress noisy HTTP loggers (don't touch the root logger)
         for _name in ("httpx", "openai", "urllib3"):
@@ -134,17 +143,19 @@ class GptApi:
         parameters = {
             "temperature": temperature/10,
             "top_p": 1,
-            "n": 1,
-            "frequency_penalty": 0,
-            "presence_penalty": 0,
             "model": model
         }
 
-        if response_format is not None:
+        if self.is_openai:
+            parameters["n"] = 1
+            parameters["frequency_penalty"] = 0
+            parameters["presence_penalty"] = 0
+
+        if response_format is not None and self.is_openai:
             parameters["response_format"] = response_format
 
         if max_tokens is not None:
-            if any(model.startswith(p) for p in ("gpt-4.1", "gpt-4o", "gpt-5")):
+            if self.is_openai and any(model.startswith(p) for p in ("gpt-4.1", "gpt-4o", "gpt-5")):
                 parameters["max_completion_tokens"] = max_tokens
             else:
                 parameters["max_tokens"] = max_tokens

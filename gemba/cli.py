@@ -15,6 +15,7 @@ flags.DEFINE_string('target_lang', None, 'Target language name.')
 flags.DEFINE_boolean('list_mqm_errors', False, 'List MQM errors.')
 flags.DEFINE_string('api_version', None, 'API version for Azure OpenAI (overrides default).')
 flags.DEFINE_boolean('no_structured_output', False, 'Disable structured output (JSON schema response_format).')
+flags.DEFINE_string('base_url', None, 'Custom API base URL (e.g. http://localhost:11434 for Ollama).')
 
 def main(argv):
     assert FLAGS.source is not None, "Source file must be provided."
@@ -44,6 +45,7 @@ def main(argv):
         FLAGS.method, FLAGS.model, FLAGS.list_mqm_errors,
         api_version=FLAGS.api_version,
         use_structured_output=not FLAGS.no_structured_output,
+        base_url=FLAGS.base_url,
     )
 
     for answer in answers:

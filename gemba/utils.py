@@ -69,7 +69,7 @@ def _get_response_format(method, use_structured_output):
 
 def get_gemba_scores(source, hypothesis, source_lang, target_lang, method, model,
                      list_mqm_errors=False, api_version=None, use_structured_output=True,
-                     reference=None):
+                     reference=None, base_url=None):
     df = pd.DataFrame({'source_seg': source, 'target_seg': hypothesis})
     df['source_lang'] = source_lang
     df['target_lang'] = target_lang
@@ -77,7 +77,7 @@ def get_gemba_scores(source, hypothesis, source_lang, target_lang, method, model
         df['reference_seg'] = reference
 
     cache = dc.Cache(f'cache/{model}_{method}', expire=None, size_limit=int(10e10), cull_limit=0, eviction_policy='none')
-    gptapi = GptApi(api_version=api_version)
+    gptapi = GptApi(api_version=api_version, base_url=base_url)
 
     response_format = _get_response_format(method, use_structured_output)
 
