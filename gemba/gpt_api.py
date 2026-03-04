@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 import time
 
@@ -120,6 +121,9 @@ class GptApi:
                 answer = choice.message.content.strip()
             else:
                 answer = choice.text.strip()
+
+            # Strip <think>...</think> blocks from reasoning models
+            answer = re.sub(r"<think>[\s\S]*?</think>\s*", "", answer).strip()
 
             # one of the responses didn't finish, we need to request more tokens
             if choice.finish_reason != "stop":
