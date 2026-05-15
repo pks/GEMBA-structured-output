@@ -14,9 +14,16 @@ from gemba.gpt_api import GptApi
 
 @pytest.fixture
 def gpt_api():
-    """Create a GptApi instance with a mocked OpenAI client."""
+    """Create a GptApi instance with a mocked OpenAI client (is_openai=True)."""
     with patch("openai.OpenAI"):
         return GptApi()
+
+
+@pytest.fixture
+def ollama_api():
+    """Create a GptApi instance configured for a non-OpenAI endpoint."""
+    with patch("openai.OpenAI"):
+        return GptApi(base_url="http://localhost:11434")
 
 
 class TestRequestApiContentFilter:
@@ -109,3 +116,139 @@ class TestCallApiParameters:
         gpt_api.call_api("test prompt", "gpt-4o", temperature=0, max_tokens=None)
         call_kwargs = gpt_api.client.chat.completions.create.call_args[1]
         assert "response_format" not in call_kwargs
+
+
+class TestClientInitialization:
+    """Tests for GptApi client initialization paths."""
+
+    def test_openai_sets_is_openai_true(self, gpt_api):
+        """OpenAI API path should set is_openai=True."""
+        assert gpt_api.is_openai is True
+
+    def test_base_url_sets_is_openai_false(self, ollama_api):
+        """Custom base_url should set is_openai=False."""
+        assert ollama_api.is_openai is False
+
+    def test_base_url_appends_v1(self):
+        """base_url should get /v1 appended."""
+        with patch("openai.OpenAI") as mock_openai:
+            GptApi(base_url="http://localhost:11434")
+            mock_openai.assert_called_once_with(
+                base_url="http://localhost:11434/v1", api_key="none"
+            )
+
+    def test_base_url_strips_trailing_slash(self):
+        """Trailing slash on base_url should be stripped before appending /v1."""
+        with patch("openai.OpenAI") as mock_openai:
+            GptApi(base_url="http://localhost:11434/")
+            mock_openai.assert_called_once_with(
+                base_url="http://localhost:11434/v1", api_key="none"
+            )
+
+    def test_ollama_host_env_var(self):
+        """OLLAMA_HOST env var should configure the client."""
+        with patch.dict(os.environ, {"OLLAMA_HOST": "http://myhost:11434"}, clear=False):
+            # Remove OPENAI keys so OLLAMA_HOST takes priority
+            env = os.environ.copy()
+            env.pop("OPENAI_API_KEY", None)
+            env.pop("OPENAI_AZURE_ENDPOINT", None)
+            with patch.dict(os.environ, env, clear=True):
+                with patch("openai.OpenAI") as mock_openai:
+                    api = GptApi()
+                    mock_openai.assert_called_once_with(
+                        base_url="http://myhost:11434/v1", api_key="ollama"
+                    )
+                    assert api.is_openai is False
+
+    def test_missing_all_env_vars_raises(self):
+        """Should raise when no API credentials are configured."""
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(Exception, match="Set OPENAI_API_KEY"):
+                GptApi()
+
+
+class TestNonOpenAIParameters:
+    """Tests for parameter gating on non-OpenAI providers."""
+
+    def test_non_openai_skips_openai_specific_params(self, ollama_api):
+        """Non-OpenAI providers should not send n, frequency_penalty, presence_penalty."""
+        ollama_api.client = MagicMock()
+        ollama_api.call_api("test prompt", "llama3.2", temperature=0, max_tokens=500)
+        call_kwargs = ollama_api.client.chat.completions.create.call_args[1]
+        assert "n" not in call_kwargs
+        assert "frequency_penalty" not in call_kwargs
+        assert "presence_penalty" not in call_kwargs
+
+    def test_non_openai_skips_response_format(self, ollama_api):
+        """Non-OpenAI providers should not send response_format."""
+        ollama_api.client = MagicMock()
+        rf = {"type": "json_schema", "json_schema": {"name": "test"}}
+        ollama_api.call_api("test prompt", "llama3.2", temperature=0, max_tokens=None, response_format=rf)
+        call_kwargs = ollama_api.client.chat.completions.create.call_args[1]
+        assert "response_format" not in call_kwargs
+
+    def test_non_openai_always_uses_max_tokens(self, ollama_api):
+        """Non-OpenAI providers should always use max_tokens, never max_completion_tokens."""
+        ollama_api.client = MagicMock()
+        ollama_api.call_api("test prompt", "gpt-4o", temperature=0, max_tokens=500)
+        call_kwargs = ollama_api.client.chat.completions.create.call_args[1]
+        assert "max_tokens" in call_kwargs
+        assert "max_completion_tokens" not in call_kwargs
+
+    def test_openai_includes_openai_specific_params(self, gpt_api):
+        """OpenAI provider should include n, frequency_penalty, presence_penalty."""
+        gpt_api.client = MagicMock()
+        gpt_api.call_api("test prompt", "gpt-4", temperature=0, max_tokens=None)
+        call_kwargs = gpt_api.client.chat.completions.create.call_args[1]
+        assert call_kwargs["n"] == 1
+        assert call_kwargs["frequency_penalty"] == 0
+        assert call_kwargs["presence_penalty"] == 0
+
+
+class TestThinkBlockStripping:
+    """Tests for stripping <think> blocks from reasoning model responses."""
+
+    def _make_response(self, content, finish_reason="stop"):
+        """Create a mock API response with the given content."""
+        choice = MagicMock()
+        choice.message.content = content
+        choice.finish_reason = finish_reason
+        response = MagicMock()
+        response.choices = [choice]
+        return response
+
+    def test_strips_think_block(self, gpt_api):
+        """Should strip <think>...</think> and return only the answer."""
+        gpt_api.call_api = MagicMock(
+            return_value=self._make_response("<think>Let me reason about this...</think>\n42")
+        )
+        answers = gpt_api.request_api("prompt", "model")
+        assert answers[0]["answer"] == "42"
+
+    def test_strips_multiline_think_block(self, gpt_api):
+        """Should strip multi-line think blocks."""
+        gpt_api.call_api = MagicMock(
+            return_value=self._make_response(
+                "<think>\nStep 1: analyze\nStep 2: evaluate\n</think>\n{\"score\": 75}"
+            )
+        )
+        answers = gpt_api.request_api("prompt", "model")
+        assert answers[0]["answer"] == '{"score": 75}'
+
+    def test_no_think_block_unchanged(self, gpt_api):
+        """Responses without think blocks should be unchanged."""
+        gpt_api.call_api = MagicMock(
+            return_value=self._make_response("42")
+        )
+        answers = gpt_api.request_api("prompt", "model")
+        assert answers[0]["answer"] == "42"
+
+    def test_strips_multiple_think_blocks(self, gpt_api):
+        """Should strip all think blocks if multiple are present."""
+        gpt_api.call_api = MagicMock(
+            return_value=self._make_response(
+                "<think>first</think>hello <think>second</think>world"
+            )
+        )
+        answers = gpt_api.request_api("prompt", "model")
+        assert answers[0]["answer"] == "hello world"
